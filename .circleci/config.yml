@@ -1,0 +1,83 @@
+version: 2.1
+
+# تعریف پارامترهایی که از سمت ورکر کلودفلر ارسال می‌شوند
+parameters:
+  run_download_job:
+    type: boolean
+    default: false
+  file_url:
+    type: string
+    default: ""
+  file_name:
+    type: string
+    default: ""
+  chat_id:
+    type: string
+    default: ""
+  caption:
+    type: string
+    default: ""
+
+jobs:
+  download_and_send_to_telegram:
+    docker:
+      - image: cimg/base:current
+    resource_class: large # استفاده از منابع بیشتر برای سرعت بالاتر (در پلن رایگان مجاز است)
+    steps:
+      - run:
+          name: Download File and Send to Telegram
+          command: |
+            # 1. دریافت متغیرها
+            FILE_NAME="<< pipeline.parameters.file_name >>"
+            FILE_URL="<< pipeline.parameters.file_url >>"
+            CHAT_ID="<< pipeline.parameters.chat_id >>"
+            CAPTION="<< pipeline.parameters.caption >>"
+            
+            if [ -z "$FILE_URL" ]; then
+              echo "Error: No file URL provided."
+              exit 1
+            fi
+
+            echo "🚀 Downloading $FILE_NAME ..."
+            curl -L -o "$FILE_NAME" "$FILE_URL"
+
+            # 2. بررسی حجم فایل (تلگرام محدودیت ۵۰ مگابایتی برای ربات‌های استاندارد دارد)
+            FILE_SIZE=$(stat -c%s "$FILE_NAME")
+            MAX_SIZE=$((49 * 1024 * 1024)) # 49 MB
+
+            if [ $FILE_SIZE -gt $MAX_SIZE ]; then
+              echo "📦 File is larger than 50MB. Splitting into chunks..."
+              mkdir -p parts
+              # تقسیم فایل به پارت‌های 49 مگابایتی
+              split -b 49M "$FILE_NAME" "parts/${FILE_NAME}.part"
+              
+              TOTAL_PARTS=$(ls parts | wc -l)
+              PART_NUM=1
+              
+              for part in parts/*; do
+                echo "📤 Sending part $PART_NUM of $TOTAL_PARTS..."
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+                     -F chat_id="$CHAT_ID" \
+                     -F document=@"$part" \
+                     -F caption="$CAPTION 
+📦 Part $PART_NUM of $TOTAL_PARTS (via CircleCI)" > /dev/null
+                
+                PART_NUM=$((PART_NUM + 1))
+                sleep 2 # جلوگیری از Rate Limit تلگرام
+              done
+            else
+              echo "📤 Sending single file to Telegram..."
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+                   -F chat_id="$CHAT_ID" \
+                   -F document=@"$FILE_NAME" \
+                   -F caption="$CAPTION (via CircleCI)" > /dev/null
+            fi
+            
+            echo "✅ Process completed!"
+
+workflows:
+  telegram_downloader_workflow:
+    # این ورک‌فلو فقط زمانی اجرا می‌شود که پارامتر run_download_job مقدار true داشته باشد (درخواست از API)
+    when: << pipeline.parameters.run_download_job >>
+    jobs:
+      - download_and_send_to_telegram
